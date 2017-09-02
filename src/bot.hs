@@ -422,8 +422,7 @@ type Reaction' e a = Value -> Action' e a
 
 
 {-
-    The Behaviour data type has now two different constructors; one for all reactions, one for everything else.
-    "everything else" keeps track of the name of the bot, its reactions, onTimer, timer, and also the default state for the behaviour.
+    The Behaviour data type keeps track of the name of the bot, its reactions, onTimer, timer, and also the default state for the behaviour.
     defaultState must be an instance of the BotStateInstance class, in order to store it. The name of the Behaviour will be used when saving/loading internal state; the file it loads has the same name.
 -}
 data Behaviour a =
@@ -437,6 +436,7 @@ data Behaviour a =
         ,   defaultState    :: a -- Will become internal state.
         }
 
+-- The ReactionSet, provided by the Behaviour, contains the reactions for each possible event.
 data ReactionSet a =
     ReactionSet
         {
