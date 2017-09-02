@@ -472,7 +472,7 @@ data ReactionSet a =
         ,   voiceServerUpdate       :: Reaction a
         }
 
--- Non-acting actions simply don't change the state carried into it, and return the [Command] []. 
+-- Non-acting actions simply don't change the state carried into it, and return []. 
 defaultBehaviour :: BotStateInstance a => Behaviour a
 defaultBehaviour = Behaviour {
         name            = "TrashBot"
