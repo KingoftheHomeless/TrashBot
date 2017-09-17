@@ -18,7 +18,7 @@ import Text.Read (readMaybe)
 import qualified Data.List as List (isInfixOf)
 
 -- You must provide the authorization token for the bot you registered, by replacing the string that token is bound to.
-token = "INSERT_TOKEN_HERE"
+token = "INPUT_TOKEN_HERE"
 main = launchBot token testBehaviour
 
 ---------------------------------
@@ -163,9 +163,9 @@ hMessageCreate eD retro =
                     "!shutdown"                 -> \_ -> shutdown
                     "!quit"                     -> \_ -> shutdown
                     "!trash"                    -> \_ -> transmitvoice "TRASH"
-                    "!flush"                    -> \_ -> flush
-                    "!reconnect"                -> \_ _ _ -> return [FakePayload Reconnect]
-                    "!status"                   -> \args _ _ -> return [SendPayload $ Status $ unwords args]        --TODO: Restrict to those with Admin permissions.
+                    --"!flush"                    -> \_ -> flush
+                    --"!reconnect"                -> \_ _ _ -> return [FakePayload Reconnect]
+                    --"!status"                   -> \args _ _ -> return [SendPayload $ Status $ unwords args]        --TODO: Restrict to those with Admin permissions.
                     c                           -> \_ _ _ -> (liftIO . putStrLn) ("Unknown command: " ++ c) >> return []
 
 
@@ -427,7 +427,7 @@ hChannelCreate eD _
     | textChannel = skipError $ (asRequest $ wait (createMessage channelId ("Welcome to the world, " ++ channelName ++ "! Enjoy your stay.") False)) >> return []
     | otherwise = return []
     where
-        textChannel = (filterJSON eD "type" :: Int) == 0
+        textChannel = filterJSON eD "type" == ("text" :: Text)
         channelId = filterJSON eD "id"
         channelName = filterJSON eD "name"
 

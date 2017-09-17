@@ -1,7 +1,7 @@
-{-# LANGUAGE MultiParamTypeClasses, FunctionalDependencies, OverloadedStrings, RecordWildCards, NamedFieldPuns, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses, FunctionalDependencies, OverloadedStrings, RecordWildCards, NamedFieldPuns, GeneralizedNewtypeDeriving, ApplicativeDo #-}
 
 module Bot where
-    
+
 import qualified Crypto.Saltine.Class as Salt
 import Crypto.Saltine.Core.SecretBox (Key, Nonce, secretbox)
 import Data.Aeson as Aeson hiding (Result)
@@ -105,7 +105,7 @@ instance FromJSON Payload where
         (obj .: "op" :: Parser Int) >>= \op ->
             case op of -- determine payload and construct it
                 0 ->
-                    Dispatch <$> 
+                    Dispatch <$>
                         obj .: "d" <*>  -- Will become eventData
                         obj .: "s" <*>  -- Will become sq
                         obj .: "t"      -- Will become eventName
@@ -130,17 +130,17 @@ instance FromJSON Payload where
 -- Definition of converting Payload -> JSON
 -- Constructs JSON as they are defined in docs of the discord API
 instance ToJSON Payload where
-    toJSON Heartbeat{..} = object $
+    toJSON Heartbeat{..} = object
         [
             "op" .= (1 :: Int) ,
             "d" .= sq
         ]
-    toJSON Identify{..} = object $
+    toJSON Identify{..} = object
         [
             "op" .= (2 :: Int) ,
             "d" .= eventData
         ]
-    toJSON (Status game) = object $
+    toJSON (Status game) = object
         [
             "op" .= (3 :: Int) ,
             "d" .= object [
@@ -153,7 +153,7 @@ instance ToJSON Payload where
         where
             actual :: Value
             actual | null game = Null
-                   | otherwise = object ["name" .= game]
+                   | otherwise = object ["name" .= game, "type" .= Number 0]
     toJSON VoiceStateUpdate{..} = object
         [
             "op" .= (4 :: Int)
@@ -164,7 +164,7 @@ instance ToJSON Payload where
                 ,   "self_deaf"     .= False
                 ]
         ]
-    toJSON (Resume token session_id sq) = object $
+    toJSON (Resume token session_id sq) = object
         [
             "op" .= (6 :: Int) ,
             "d" .= object [
@@ -470,6 +470,7 @@ data ReactionSet a =
         ,   userUpdate              :: Reaction a
         ,   voiceStateUpdate        :: Reaction a
         ,   voiceServerUpdate       :: Reaction a
+        ,   messageReactionAdd      :: Reaction a
         }
 
 -- Non-acting actions simply don't change the state carried into it, and return []. 
@@ -514,10 +515,11 @@ defaultReactions = ReactionSet {
     userSettingsUpdate      = null,
     userUpdate              = null,
     voiceStateUpdate        = null,
-    voiceServerUpdate       = null
+    voiceServerUpdate       = null,
+    messageReactionAdd      = null
     }
     -- Default non-reacting reaction
-    where null = (\_ _ -> return [])
+    where null = \_ _ -> return []
 
 
 
@@ -551,7 +553,7 @@ filterJSON st key = maybe (error $ "Bot.filterJSON: Key doesn't exist: " ++ show
 
 lookupJSON :: FromJSON a => Value -> Text -> Maybe a
 lookupJSON (Object object) key = parseMaybe (.: key) object
-lookupJSON o _ = error ("Bot.lookupJSON: Not an object: " ++ (show o))  -- Should use type Object instead
+lookupJSON o _ = error ("Bot.lookupJSON: Not an object: " ++ show o)  -- Should use type Object instead
 
 
 
@@ -581,7 +583,7 @@ getJSON conn = fmap (fromJust . Aeson.decode) (receiveData conn)
    SIDE-EFFECTS: Sends the JSON encoded payload through connection
 -}
 sendJSON :: ToJSON a => Connection -> a -> IO ()
-sendJSON conn = (sendTextData conn) . Aeson.encode
+sendJSON conn = sendTextData conn . Aeson.encode
 
 
 ------------------------------------API interaction---------------------------------------------
@@ -645,8 +647,8 @@ data Command a
 -}
 wait :: SupportsNetworkError e => ActionMonad e s a -> ActionMonad e s a
 wait q = catchError q $ \result ->
-    case (toBR result) of
-        Just (RateLimited _ x) -> liftIO (threadDelay ((x + 1) * 1000000)) >> (wait q)
+    case toBR result of
+        Just (RateLimited _ x) -> liftIO (threadDelay ((x + 1) * 1000000)) >> wait q
         _   -> throwError result
 {-
     Performs a request, but in case of failure, defaults to Monoidic empty.
@@ -709,7 +711,7 @@ customRequest param path method payload = do
         _       -> continue authHeader time
     where
         continue :: (SupportsNetworkError e, FromJSON v) => Options -> Int -> ActionMonad e s v
-        continue authHeader time = do
+        continue authHeader time =
             case param of       -- Determines what HashMap we read from, and how to construct the URL address.
                 (Guild s)   -> do
                     BotState{rateLimitGuilds} <- get
@@ -969,6 +971,7 @@ data Permissions =
             ,   manageEmojis        :: Bool
             }
     |   Admin
+    deriving (Show)
 
 defaultPermissions :: Permissions
 defaultPermissions =
@@ -1102,32 +1105,46 @@ hasPermission :: Permissions -> (Permissions -> Bool) -> Bool
 hasPermission p func    = isAdmin p || func p
 
 -- A pure function to determine a member's permissions given an array of the guild's roles, and an array of the ID's of the roles the member possesses.
-determineGuildMemberPermissions :: Vector Value -> Vector Text -> Permissions
-determineGuildMemberPermissions guildroles memberroles =
+determineGuildMemberPermissions :: Value -> Value -> Permissions
+determineGuildMemberPermissions guild member =
     let
+        memberid            :: Text
+        memberid            = filterJSON (filterJSON member "user") "id"
+
+        guildroles          :: Vector Value
+        guildroles          = filterJSON guild "roles"
+
+        guildowner          :: Text
+        guildowner          = filterJSON guild "owner_id"
+
+        memberroles         :: Vector Text
+        memberroles         = filterJSON member "roles"
+
         findAndUpdate :: Text -> Permissions -> Permissions
         findAndUpdate rid next =
             case find ((==) rid . flip filterJSON "id") guildroles of
                 Just a  -> updatePermissions True (filterJSON a "permissions") next
                 Nothing -> next
     in
-        Prelude.foldr findAndUpdate defaultPermissions memberroles
+        if memberid == guildowner
+            then Admin
+            else Prelude.foldr findAndUpdate defaultPermissions memberroles
 
 -- A pure function to determine a member's permissions within a channel given  an array of the guild's roles,
 -- an array of permission overwrite objects for the channel, and a guild member object.
-determineChannelMemberPermissions :: Vector Value -> Vector Value -> Value -> Permissions
-determineChannelMemberPermissions guildroles overwrites member
+determineChannelMemberPermissions :: Value -> Vector Value -> Value -> Permissions
+determineChannelMemberPermissions guild overwrites member
     | isAdmin guildpermissions  = Admin
     | otherwise                 = Prelude.foldr findAndUpdate guildpermissions overwrites
     where
         memberid            :: Text
-        memberid            = filterJSON member "id"
+        memberid            = filterJSON (filterJSON member "user") "id"
 
         memberroles         :: Vector Text
         memberroles         = filterJSON member "roles"
 
         guildpermissions    :: Permissions
-        guildpermissions    = determineGuildMemberPermissions guildroles memberroles
+        guildpermissions    = determineGuildMemberPermissions guild member
 
 
         findAndUpdate                   :: (Value -> Permissions -> Permissions)
@@ -1156,17 +1173,10 @@ determineChannelMemberPermissions guildroles overwrites member
 
 -- Uses IO to get the permissions for a guild member. Has no sort of memoize built in.
 getGuildMemberPermissions :: (SupportsNetworkError e) => String -> String -> ActionMonad e s Permissions
-getGuildMemberPermissions gid uid = do
-    guild   <- getGuild gid
-    member  <- getGuildMember gid uid
-    return $
-        let
-            guildroles      :: Vector Value
-            guildroles      = filterJSON guild "roles"
-            memberroles     :: Vector Text
-            memberroles     = filterJSON member "roles"
-        in
-            determineGuildMemberPermissions guildroles memberroles
+getGuildMemberPermissions gid uid = determineGuildMemberPermissions <$> (getGuild gid) <*> (getGuildMember gid uid) 
+--    guild   <- getGuild gid
+--    member  <- getGuildMember gid uid
+--    return $ determineGuildMemberPermissions guild member
 
 -- A variant that allows the user to provide functions that modify the getGuild and getRequest functions, respectively.
 -- This allows for memoization, or wait for rate limits, etc.
@@ -1175,17 +1185,10 @@ getGuildMemberPermissions' ::
         (ActionMonad e s Value -> ActionMonad e s Value)
     ->  (String -> ActionMonad e s Value -> ActionMonad e s Value)
     ->  String -> String -> ActionMonad e s Permissions
-getGuildMemberPermissions' gf mf gid uid = do 
-    guild   <- gf (getGuild gid)
-    member  <- mf gid (getGuildMember gid uid)
-    return $
-        let
-            guildroles      :: Vector Value
-            guildroles      = filterJSON guild "roles"
-            memberroles     :: Vector Text
-            memberroles     = filterJSON member "roles"
-        in
-            determineGuildMemberPermissions guildroles memberroles
+getGuildMemberPermissions' gf mf gid uid = determineGuildMemberPermissions <$> gf (getGuild gid) <*> mf gid (getGuildMember gid uid)
+--    guild   <- gf (getGuild gid)
+--    member  <- mf gid (getGuildMember gid uid)
+--    return $ determineGuildMemberPermissions guild member
         
 getChannelMemberPermissions :: (SupportsNetworkError e) => String -> String -> ActionMonad e s Permissions
 getChannelMemberPermissions cid uid = do
@@ -1197,14 +1200,10 @@ getChannelMemberPermissions cid uid = do
     member  <- getGuildMember gid uid
     return $
         let
-            guildroles      :: Vector Value
-            guildroles      = filterJSON guild "roles"
-
             overwrites      :: Vector Value
             overwrites      = filterJSON channel "permission_overwrites"
-
         in
-            determineChannelMemberPermissions guildroles overwrites member
+            determineChannelMemberPermissions guild overwrites member
 
 getChannelMemberPermissions' ::
         (SupportsNetworkError e) =>
@@ -1221,14 +1220,10 @@ getChannelMemberPermissions' cf gf mf cid uid = do
     member  <- mf gid (getGuildMember gid uid)
     return $
         let
-            guildroles      :: Vector Value
-            guildroles      = filterJSON guild "roles"
-
             overwrites      :: Vector Value
             overwrites      = filterJSON channel "permission_overwrites"
-
         in
-            determineChannelMemberPermissions guildroles overwrites member
+            determineChannelMemberPermissions guild overwrites member
 
 
 
@@ -1305,7 +1300,7 @@ bot session token behaviour =
 
         emergencyshutdown :: Show e => MVar Bool -> String -> e -> IO ()
         emergencyshutdown toquit site = \e -> do
-            putStrLn $ "*** Unhandled IO Exception in " ++ site ++ "Given error is: " ++ show e ++ " ***"
+            putStrLn $ "*** Unhandled IO Exception in " ++ site ++ ". Given error is: " ++ show e ++ " ***"
             void $ tryPutMVar toquit False
 
         createThread :: MVar [ThreadId] -> IO () -> IO ()
@@ -1635,7 +1630,7 @@ bot session token behaviour =
                                             (addr:_)    <- getAddrInfo Nothing (Just host) (Just port)                          -- Haha, time to establish the UDP connection! Using Network.Socket! I can't be arsed to explain this, it just works.
                                             vsocket     <- socket (addrFamily addr) Datagram defaultProtocol        
                                             NS.connect vsocket (addrAddress addr)      
-                                            -- setSocketOption vsocket SendBuffer 65535                                            -- There's a default limit to how large packets we can send. We strip that away. Not actually neccesary.
+                                            -- setSocketOption vsocket SendBuffer 65535                                            -- There's a default limit to how large packets we can send. We strip that away. Not actually neccesary, and it introduced a delay.
     
                                             void $ send vsocket $ Strict.append ssrc $ Strict.replicate 66 0x00                 -- Send the 70-byte packet for IP-discovery over the UDP socket.
                                             ipdiscovery <- recv vsocket 70                                                      -- Wait for another 70-byte packet from the UDP socket. This will contain our IP and port.
@@ -1732,6 +1727,7 @@ react Behaviour{reactions=ReactionSet{..}} eventName =
         "USER_SETTINGS_UPDATE"      -> userSettingsUpdate
         "USER_UPDATE"               -> userUpdate
         "VOICE_STATE_UPDATE"        -> voiceStateUpdate
+        "MESSAGE_REACTION_ADD"      -> messageReactionAdd
 --        "VOICE_SERVER_UPDATE"       -> voiceServerUpdate
         _ -> (\_ _ -> (liftIO $ putStrLn $ "Some strange eventName! :" ++ eventName) >> return [])
 
